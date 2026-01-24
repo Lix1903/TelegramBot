@@ -1,1 +1,5 @@
+python-dotenv
+requests
 pyTelegramBotAPI
+dotenv
+peewee
