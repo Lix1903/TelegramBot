@@ -2,7 +2,7 @@ import logging
 import os
 from loader import bot
 from database import init_db
-import handlers # noqa
+import handlers  # noqa
 
 log_dir = "logs"
 os.makedirs(log_dir, exist_ok=True)
