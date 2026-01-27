@@ -1,36 +1,46 @@
 from loader import bot
-from utils.api import search_cheap_flights, get_weather, validate_date, normalize_iata
+from utils.api import search_cheap_flights, get_weather, validate_date
 from database.queries import add_search
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
-import re
 
 
-def build_aviasales_direct_link(origin: str, destination: str, depart_date: str, return_date: str = None) -> str:
-    """
-    Генерирует корректную ссылку Aviasales с поддержкой one_way.
-    """
+# Функция для сокращения IATA и дат
+def shorten_callback_data(origin, dest, depart_date, return_date):
+    # Берём первые 3 символа и делаем заглавными
+    from_iata = origin.strip().upper()[:3]
+    to_iata = dest.strip().upper()[:3]
+    # Дата: 2026-02-22 → 220226
+    dep_short = depart_date.replace("-", "")[2:]
+    ret_short = return_date.replace("-", "")[2:] if return_date else "OW"
+
+    data = f"sort|{from_iata}|{to_iata}|{dep_short}|{ret_short}"
+    if len(data) > 60:
+        # На всякий случай обрезаем
+        return data[:60]
+    return data
+
+
+# Распаковка данных
+def parse_callback_data(data: str):
     try:
-        # Преобразуем даты: 2026-02-22 → 220226 (ДДММГГ)
-        def date_to_dmmyy(d: str) -> str:
-            return re.sub(r"(\d{4})-(\d{2})-(\d{2})", r"\3\2\1", d)[2:]
+        parts = data.split("|")
+        if len(parts) < 5:
+            return None
+        sort_type = "asc" if "asc" in parts[0] else "desc"
+        from_iata = parts[1]
+        to_iata = parts[2]
+        dep_short = parts[3]  # 220226
+        ret_short = parts[4]  # 290226 или OW
 
-        from_iata = normalize_iata(origin)
-        to_iata = normalize_iata(destination)
-        depart_part = date_to_dmmyy(depart_date)
+        # Восстанавливаем полные даты
+        depart_date = f"20{dep_short[4:]}-{dep_short[2:4]}-{dep_short[:2]}"
+        return_date = None if ret_short == "OW" else f"20{ret_short[4:]}-{ret_short[2:4]}-{ret_short[:2]}"
 
-        # Если нет даты возврата — one_way
-        if not return_date:
-            route = f"{from_iata}{to_iata}{depart_part}"
-            return f"https://www.aviasales.ru/search/{route}?currency=RUB&one_way=true"
-
-        # Иначе — туда и обратно
-        return_part = date_to_dmmyy(return_date)
-        route = f"{from_iata}{to_iata}{depart_part}{to_iata}{from_iata}{return_part}"
-        return f"https://www.aviasales.ru/search/{route}?currency=RUB"
-
+        return sort_type, from_iata, to_iata, depart_date, return_date
     except Exception as e:
-        print(f"❌ Ошибка генерации ссылки: {e}")
-        return "https://www.aviasales.ru"
+        print(f"❌ Ошибка разбора callback_data: {e}")
+        return None
+
 
 @bot.message_handler(func=lambda m: m.text == "Поиск авиабилетов")
 def ask_origin_roundtrip(message):
@@ -103,53 +113,50 @@ def show_flight_results(message, origin, destination, depart_date):
         if return_d:
             return_d = return_d.split('T')[0]
 
-        # Основная логика ссылки
-        ticket_url = flight.get('url')
-        if ticket_url and ticket_url.startswith('/'):
-            direct_link = f"https://www.aviasales.ru{ticket_url}"
-        else:
-            # Если API не дал хорошей ссылки — генерируем вручную
-            direct_link = build_aviasales_direct_link(origin, destination, depart_date, return_date)
+        buy_link = flight.get('url')
 
         text = (f"{i}. ✈️ <b>Рейс туда и обратно</b>\n"
                 f"   📅 Вылет: {depart}\n"
                 f"   📅 Возврат: {return_d}\n"
                 f"   💸 <b>{price} ₽</b>\n"
-                f"   🔗 <a href='{direct_link}'>Купить этот билет</a>")
+                f"   🔗 <a href='{buy_link}'>Купить этот билет</a>")
         bot.send_message(user_id, text, parse_mode='HTML', disable_web_page_preview=True)
 
-    # Кнопки сортировки
+    # Кнопки сортировки — используем короткие данные
     markup = InlineKeyboardMarkup()
-    markup.row(
-        InlineKeyboardButton("📉 Дешевле",
-                             callback_data=f"sort_price_asc|{origin}|{destination}|{depart_date}|{return_date or ''}"),
-        InlineKeyboardButton("📈 Дороже",
-                             callback_data=f"sort_price_desc|{origin}|{destination}|{depart_date}|{return_date or ''}")
-    )
+    btn_asc = InlineKeyboardButton("📉 Дешевле", callback_data=shorten_callback_data(origin, destination, depart_date, return_date))
+    btn_desc = InlineKeyboardButton("📈 Дороже", callback_data=shorten_callback_data(origin, destination, depart_date, return_date).replace("asc", "desc"))
+    markup.row(btn_asc, btn_desc)
+
     bot.send_message(user_id, "📊 Хотите отсортировать результаты?", reply_markup=markup)
 
 
-@bot.callback_query_handler(func=lambda c: c.data.startswith("sort_"))
+@bot.callback_query_handler(func=lambda c: c.data.startswith("sort|"))
 def sort_flights_callback(call):
-    data = call.data.split("|")
-    sort_type = data[0]
-    origin, dest, depart_date, return_date = data[1], data[2], data[3], data[4] if len(data) > 4 else ""
+    parsed = parse_callback_data(call.data)
+    if not parsed:
+        bot.send_message(call.message.chat.id, "❌ Не удалось обработать запрос.")
+        return
 
+    sort_type, from_iata, to_iata, depart_date, return_date = parsed
     user_id = call.message.chat.id
-    bot.edit_message_text("🔄 Пересортировка результатов...", user_id, call.message.message_id)
 
+    bot.edit_message_text("🔄 Пересортировка...", user_id, call.message.message_id)
+
+    # Здесь нужно получить полные названия городов
+    # Временно используем IATA как есть. В реальности можно хранить маппинг.
     flights = search_cheap_flights(
-        origin=origin,
-        destination=dest,
+        origin=from_iata,
+        destination=to_iata,
         depart_date=depart_date,
-        return_date=return_date if return_date != "" else None
+        return_date=return_date
     )
 
     if not flights:
-        bot.send_message(user_id, "❌ Не удалось получить данные для сортировки.")
+        bot.send_message(user_id, "❌ Не удалось получить данные.")
         return
 
-    reverse = "desc" in sort_type
+    reverse = sort_type == "desc"
     sorted_flights = sorted(flights, key=lambda x: x.get('price', 0), reverse=reverse)
 
     for i, f in enumerate(sorted_flights[:3], 1):
@@ -158,15 +165,10 @@ def sort_flights_callback(call):
         return_d = f.get('return_at', '—')
         if return_d:
             return_d = return_d.split('T')[0]
-
-        ticket_url = f.get('url')
-        if ticket_url and ticket_url.startswith('/'):
-            direct_link = f"https://www.aviasales.ru{ticket_url}"
-        else:
-            direct_link = build_aviasales_direct_link(origin, dest, depart_date, return_date)
+        buy_link = f.get('url')
 
         text = (f"{i}. ✈️ <b>Отсортировано: {'дороже' if reverse else 'дешевле'}</b>\n"
                 f"   📅 {depart} → {return_d}\n"
                 f"   💸 <b>{price} ₽</b>\n"
-                f"   🔗 <a href='{direct_link}'>Купить этот билет</a>")
+                f"   🔗 <a href='{buy_link}'>Купить</a>")
         bot.send_message(user_id, text, parse_mode='HTML', disable_web_page_preview=True)

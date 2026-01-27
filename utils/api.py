@@ -1,12 +1,19 @@
 import requests
 import os
-from dotenv import load_dotenv
+import json
 from datetime import datetime, timedelta
+from dotenv import load_dotenv
 
 load_dotenv()
 
 TRAVEL_TOKEN = os.getenv('TRAVEL_TOKEN')
 WEATHER_KEY = os.getenv('WEATHER_KEY')
+
+# Путь к JSON-файлу для сохранения ответа API
+JSON_FILE_PATH = 'data/flights_response.json'
+
+# Создаем папку, если её нет
+os.makedirs(os.path.dirname(JSON_FILE_PATH), exist_ok=True)
 
 # Расширенный IATA-справочник
 IATA_MAP = {
@@ -43,16 +50,44 @@ def validate_date(date_str: str) -> bool:
     except ValueError:
         return False
 
+def save_to_json(data: dict):
+    """
+    Сохраняет данные в JSON-файл.
+    """
+    try:
+        with open(JSON_FILE_PATH, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=4)
+        print(f"✅ Ответ API сохранён в {JSON_FILE_PATH}")
+    except Exception as e:
+        print(f"❌ Ошибка при сохранении в JSON: {e}")
+
+def load_from_json() -> dict:
+    """
+    Загружает данные из JSON-файла.
+    Возвращает пустой словарь, если файла нет.
+    """
+    try:
+        if os.path.exists(JSON_FILE_PATH):
+            with open(JSON_FILE_PATH, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            print(f"✅ Данные загружены из {JSON_FILE_PATH}")
+            return data
+        else:
+            print(f"⚠️ Файл {JSON_FILE_PATH} не найден. Будет создан при следующем сохранении.")
+    except Exception as e:
+        print(f"❌ Ошибка при чтении JSON: {e}")
+    return {}
+
 def search_cheap_flights(origin: str, destination: str, depart_date: str, return_date: str = None):
     """
     Поиск дешёвых авиабилетов через Aviasales API v3.
-    Всегда ищет round-trip (one_way=false), но если return_date не указан — ставит +7 дней.
+    Сохраняет полный ответ API в JSON и берёт ссылку 'link' как есть.
 
     :param origin: Город вылета
     :param destination: Город прилёта
     :param depart_date: Дата вылета (ГГГГ-ММ-ДД)
     :param return_date: Дата возврата (ГГГГ-ММ-ДД), опционально
-    :return: Список найденных рейсов
+    :return: Список найденных рейсов с оригинальными ссылками из поля 'link'
     """
     # Валидация дат
     if not validate_date(depart_date):
@@ -79,7 +114,7 @@ def search_cheap_flights(origin: str, destination: str, depart_date: str, return
         'destination': dest_iata,
         'departure_at': depart_date,
         'return_at': return_date,
-        'one_way': 'false',  # ВСЕГДА ищем туда и обратно
+        'one_way': 'false',
         'token': TRAVEL_TOKEN,
         'currency': 'RUB',
         'limit': 10,
@@ -92,37 +127,72 @@ def search_cheap_flights(origin: str, destination: str, depart_date: str, return
         response.raise_for_status()
         data = response.json()
 
+        # Сохраняем весь ответ API в JSON
+        save_to_json(data)
+
         if not data.get('data'):
             print("❌ Нет рейсов, найденных по вашему запросу.")
             return []
 
         flights = []
         for item in data['data']:
+            # Берём ссылку напрямую из поля 'link', без изменений
+            link = item.get('link')
+            if not link or not link.startswith('/search/'):
+                print(f"⚠️ Пропущен рейс: некорректная ссылка 'link' → {link}")
+                continue
+
+            final_url = f"https://www.aviasales.ru{link}"
+
             flight_data = {
                 'price': item.get('price'),
                 'airline': item.get('airline') or "Неизвестно",
                 'departure_at': item.get('departure_at'),
                 'return_at': item.get('return_at'),
                 'transfers': item.get('transfers', 0),
-                'url': f"https://www.aviasales.ru{item.get('url', '')}"
+                'url': final_url  # Оригинальная ссылка из 'link'
             }
             flights.append(flight_data)
         return flights
 
     except requests.exceptions.Timeout:
         print("❌ Ошибка: таймаут при запросе к API.")
+        # При ошибке — используем кэш
+        cached_data = load_from_json()
+        if cached_data:
+            print("⚠️ Используем кэшированные данные из JSON")
+            return extract_flights_from_cache(cached_data)
     except requests.exceptions.RequestException as e:
         print(f"❌ Ошибка HTTP-запроса: {e}")
     except Exception as e:
-        print(f"❌ Непредвиденная ошибка при обработке ответа: {e}")
+        print(f"❌ Непредвиденная ошибка: {e}")
     return []
+
+def extract_flights_from_cache(data: dict) -> list:
+    """
+    Извлекает рейсы из закэшированных данных, используя поле 'link'.
+    """
+    flights = []
+    for item in data.get('data', []):
+        link = item.get('link')
+        if not link or not link.startswith('/search/'):
+            continue
+        final_url = f"https://www.aviasales.ru{link}"
+        flights.append({
+            'price': item.get('price'),
+            'airline': item.get('airline') or "Неизвестно",
+            'departure_at': item.get('departure_at'),
+            'return_at': item.get('return_at'),
+            'transfers': item.get('transfers', 0),
+            'url': final_url
+        })
+    return flights
 
 def get_weather(city: str) -> str:
     """
     Получает текущую погоду в городе.
-    Использует кэширование в памяти (упрощённое).
+    Использует кэширование в памяти.
     """
-    # Простое кэширование (в реальном проекте используй Redis или файл)
     if not hasattr(get_weather, 'cache'):
         get_weather.cache = {}
 
@@ -131,7 +201,6 @@ def get_weather(city: str) -> str:
         return get_weather.cache[city]
 
     try:
-        # Шаг 1: Получить координаты
         geo_url = "https://api.openweathermap.org/geo/1.0/direct"
         geo_params = {'q': city, 'limit': 1, 'appid': WEATHER_KEY}
         geo_resp = requests.get(geo_url, params=geo_params, timeout=10)
@@ -145,7 +214,6 @@ def get_weather(city: str) -> str:
 
         lat, lon = geo_data[0]['lat'], geo_data[0]['lon']
 
-        # Шаг 2: Получить погоду
         weather_url = "https://api.openweathermap.org/data/2.5/weather"
         w_params = {
             'lat': lat,
@@ -162,7 +230,6 @@ def get_weather(city: str) -> str:
         desc = w['weather'][0]['description'].capitalize()
         result = f"🌡 {temp}°C, {desc}"
 
-        # Сохраняем в кэш
         get_weather.cache[city] = result
         return result
 
