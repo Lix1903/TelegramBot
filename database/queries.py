@@ -1,22 +1,21 @@
 from .db import SearchHistory
 from datetime import datetime
 
-def add_search(user_id, dep, dest, depart_month, return_month=""):
+def add_search(user_id, dep, dest, depart_date, return_date=""):
     """
     Сохраняет запрос в историю
     :param user_id: ID пользователя
     :param dep: город вылета
     :param dest: город прилёта
-    :param depart_month: месяц вылета (ГГГГ-ММ)
-    :param return_month: месяц возврата (ГГГГ-ММ)
+    :param depart_date: полная дата вылета (ГГГГ-ММ-ДД)
+    :param return_date: полная дата возврата (ГГГГ-ММ-ДД)
     """
     try:
-        # Сохраняем как строку, без преобразования в дату
         SearchHistory.create(
             user_id=user_id,
             departure=dep,
             destination=dest,
-            date=f"{depart_month} → {return_month}" if return_month else depart_month
+            date=f"{depart_date} → {return_date}" if return_date else depart_date
         )
     except Exception as e:
         print(f"❌ Ошибка сохранения в БД: {e}")

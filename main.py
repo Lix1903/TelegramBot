@@ -2,6 +2,7 @@ import logging
 import os
 from loader import bot
 from database import init_db
+from utils.api import init_db as init_api_db  # Добавлено: инициализация таблицы API
 import handlers  # noqa
 
 log_dir = "logs"
@@ -20,7 +21,8 @@ logger = logging.getLogger(__name__)
 
 def main():
     try:
-        init_db()
+        init_db()          # Инициализация основной БД (история поиска)
+        init_api_db()      # Инициализация таблицы api_flight_responses
         logger.info("✅ База данных инициализирована")
         logger.info("🚀 Бот запущен")
         bot.polling(none_stop=True)

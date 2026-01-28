@@ -1,42 +1,78 @@
 from loader import bot
-from utils.api import search_cheap_flights, get_weather, validate_date
+from utils.api import search_cheap_flights, get_weather, validate_date, normalize_iata
 from database.queries import add_search
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+from datetime import datetime
+
+# Обратное соответствие IATA-кодов для восстановления названий городов
+IATA_REVERSE_MAP = {
+    "MOW": "MOSCOW", "LED": "SAINT-PETERSBURG", "AER": "SOCHI",
+    "SVX": "YEKATERINBURG", "KZN": "KAZAN", "IST": "ISTANBUL",
+    "MAD": "MADRID", "BCN": "BARCELONA", "CDG": "PARIS", "LON": "LONDON"
+}
+
+def reverse_iata_lookup(iata_code: str) -> str:
+    """Преобразует IATA-код в английское название города"""
+    return IATA_REVERSE_MAP.get(iata_code.upper(), iata_code)
 
 
-# Функция для сокращения IATA и дат
 def shorten_callback_data(origin, dest, depart_date, return_date):
-    # Берём первые 3 символа и делаем заглавными
-    from_iata = origin.strip().upper()[:3]
-    to_iata = dest.strip().upper()[:3]
-    # Дата: 2026-02-22 → 220226
-    dep_short = depart_date.replace("-", "")[2:]
-    ret_short = return_date.replace("-", "")[2:] if return_date else "OW"
+    """
+    Создаёт короткую строку для callback_data.
+    Формат: sort|asc|MOW|IST|080326|150326
+    """
+    from_iata = normalize_iata(origin)
+    to_iata = normalize_iata(dest)
 
-    data = f"sort|{from_iata}|{to_iata}|{dep_short}|{ret_short}"
-    if len(data) > 60:
-        # На всякий случай обрезаем
-        return data[:60]
-    return data
+    # Разбиваем дату и пересобираем как ДДММГГ
+    dep_parts = depart_date.split("-")  # ['2026', '03', '08']
+    dep_short = dep_parts[2] + dep_parts[1] + dep_parts[0][2:]  # 08 + 03 + 26 = 080326
+
+    ret_short = "OW"
+    if return_date:
+        ret_parts = return_date.split("-")
+        ret_short = ret_parts[2] + ret_parts[1] + ret_parts[0][2:]  # 150326
+
+    # Явно указываем 'asc' по умолчанию
+    data = f"sort|asc|{from_iata}|{to_iata}|{dep_short}|{ret_short}"
+    return data[:64]  # Увеличили до 64, чтобы влезло
 
 
-# Распаковка данных
 def parse_callback_data(data: str):
+    """
+    Парсит callback_data и возвращает параметры сортировки.
+    Возвращает: (sort_type, origin, destination, depart_date, return_date)
+    """
     try:
         parts = data.split("|")
-        if len(parts) < 5:
+        if len(parts) < 6:
             return None
-        sort_type = "asc" if "asc" in parts[0] else "desc"
-        from_iata = parts[1]
-        to_iata = parts[2]
-        dep_short = parts[3]  # 220226
-        ret_short = parts[4]  # 290226 или OW
 
-        # Восстанавливаем полные даты
-        depart_date = f"20{dep_short[4:]}-{dep_short[2:4]}-{dep_short[:2]}"
-        return_date = None if ret_short == "OW" else f"20{ret_short[4:]}-{ret_short[2:4]}-{ret_short[:2]}"
+        # Теперь sort_type — это parts[1], так как parts[0] = 'sort'
+        sort_type = "asc" if parts[1] == "asc" else "desc"
+        from_iata = parts[2]
+        to_iata = parts[3]
+        dep_short = parts[4]  # 080326
+        ret_short = parts[5]  # 150326 или OW
 
-        return sort_type, from_iata, to_iata, depart_date, return_date
+        # Исправленный парсинг дат: 080326 → 2026-03-08
+        day = dep_short[:2]      # 08
+        month = dep_short[2:4]   # 03
+        year = "20" + dep_short[4:6]  # 26 → 2026
+        depart_date = f"{year}-{month}-{day}"
+
+        return_date = None
+        if ret_short != "OW" and len(ret_short) == 6:
+            return_day = ret_short[:2]
+            return_month = ret_short[2:4]
+            return_year = "20" + ret_short[4:6]
+            return_date = f"{return_year}-{return_month}-{return_day}"
+
+        # Преобразуем IATA обратно в название города на английском
+        origin_city = reverse_iata_lookup(from_iata)
+        dest_city = reverse_iata_lookup(to_iata)
+
+        return sort_type, origin_city, dest_city, depart_date, return_date
     except Exception as e:
         print(f"❌ Ошибка разбора callback_data: {e}")
         return None
@@ -122,42 +158,73 @@ def show_flight_results(message, origin, destination, depart_date):
                 f"   🔗 <a href='{buy_link}'>Купить этот билет</a>")
         bot.send_message(user_id, text, parse_mode='HTML', disable_web_page_preview=True)
 
-    # Кнопки сортировки — используем короткие данные
-    markup = InlineKeyboardMarkup()
-    btn_asc = InlineKeyboardButton("📉 Дешевле", callback_data=shorten_callback_data(origin, destination, depart_date, return_date))
-    btn_desc = InlineKeyboardButton("📈 Дороже", callback_data=shorten_callback_data(origin, destination, depart_date, return_date).replace("asc", "desc"))
-    markup.row(btn_asc, btn_desc)
+    # Логируем перед созданием кнопок
+    print(f"🔧 [КНОПКИ] depart_date={depart_date}, return_date={return_date}")
+    base_data = shorten_callback_data(origin, destination, depart_date, return_date)
+    print(f"🔧 [КНОПКИ] callback_data (base): {base_data}")
 
+    # Кнопки сортировки — используем корректные данные
+    markup = InlineKeyboardMarkup()
+
+    # Создаём базовую строку и заменяем только нужное
+    btn_asc = InlineKeyboardButton("📉 Дешевле", callback_data=base_data.replace("|asc|", "|asc|"))
+    btn_desc = InlineKeyboardButton("📈 Дороже", callback_data=base_data.replace("|asc|", "|desc|"))
+
+    markup.row(btn_asc, btn_desc)
     bot.send_message(user_id, "📊 Хотите отсортировать результаты?", reply_markup=markup)
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("sort|"))
 def sort_flights_callback(call):
+    # Логируем сырые данные
+    print(f"🔧 [RAW] Исходные данные: {call.data}")
+
     parsed = parse_callback_data(call.data)
     if not parsed:
         bot.send_message(call.message.chat.id, "❌ Не удалось обработать запрос.")
         return
 
-    sort_type, from_iata, to_iata, depart_date, return_date = parsed
+    sort_type, origin, destination, depart_date, return_date = parsed
     user_id = call.message.chat.id
+
+    # Логируем для отладки
+    print(f"🔍 [СОРТИРОВКА] Тип: {sort_type}, Параметры: {origin} → {destination}, {depart_date} → {return_date}")
+
+    # Проверка, что дата вылета не в прошлом
+    today = datetime.now().date()
+    try:
+        dep_date_obj = datetime.fromisoformat(depart_date).date()
+        print(f"📅 Дата вылета: {dep_date_obj}, Сегодня: {today}")
+        if dep_date_obj < today:
+            bot.send_message(user_id, f"❌ Дата вылета ({depart_date}) не может быть в прошлом. Попробуйте снова.")
+            return
+    except ValueError as e:
+        print(f"❌ Ошибка парсинга даты: {e}")
+        bot.send_message(user_id, "❌ Некорректная дата вылета.")
+        return
 
     bot.edit_message_text("🔄 Пересортировка...", user_id, call.message.message_id)
 
-    # Здесь нужно получить полные названия городов
-    # Временно используем IATA как есть. В реальности можно хранить маппинг.
     flights = search_cheap_flights(
-        origin=from_iata,
-        destination=to_iata,
+        origin=origin,
+        destination=destination,
         depart_date=depart_date,
         return_date=return_date
     )
 
     if not flights:
-        bot.send_message(user_id, "❌ Не удалось получить данные.")
+        bot.send_message(user_id, "❌ Не удалось получить данные для сортировки.")
         return
 
+    # Убедимся, что сортировка работает правильно
     reverse = sort_type == "desc"
     sorted_flights = sorted(flights, key=lambda x: x.get('price', 0), reverse=reverse)
+
+    # Логируем цены для отладки
+    prices = [f.get('price') for f in flights]
+    print(f"💰 Цены до сортировки: {prices}")
+    sorted_prices = sorted(prices, reverse=reverse)
+    print(f"📊 Цены после сортировки: {sorted_prices}")
 
     for i, f in enumerate(sorted_flights[:3], 1):
         price = f.get('price', 'Не указана')
@@ -167,7 +234,8 @@ def sort_flights_callback(call):
             return_d = return_d.split('T')[0]
         buy_link = f.get('url')
 
-        text = (f"{i}. ✈️ <b>Отсортировано: {'дороже' if reverse else 'дешевле'}</b>\n"
+        direction = "дороже" if reverse else "дешевле"
+        text = (f"{i}. ✈️ <b>Отсортировано: {direction}</b>\n"
                 f"   📅 {depart} → {return_d}\n"
                 f"   💸 <b>{price} ₽</b>\n"
                 f"   🔗 <a href='{buy_link}'>Купить</a>")

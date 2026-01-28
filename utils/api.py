@@ -3,41 +3,64 @@ import os
 import json
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
+import sqlite3
+from contextlib import contextmanager
 
 load_dotenv()
 
 TRAVEL_TOKEN = os.getenv('TRAVEL_TOKEN')
 WEATHER_KEY = os.getenv('WEATHER_KEY')
 
-# Путь к JSON-файлу для сохранения ответа API
-JSON_FILE_PATH = 'data/flights_response.json'
+# Путь к общей базе данных
+DB_PATH = 'history.db'
 
-# Создаем папку, если её нет
-os.makedirs(os.path.dirname(JSON_FILE_PATH), exist_ok=True)
+@contextmanager
+def get_db_connection():
+    """Контекстный менеджер для подключения к общей БД"""
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        yield conn
+    finally:
+        conn.close()
 
-# Расширенный IATA-справочник
-IATA_MAP = {
-    "MOSCOW": "MOW", "MOW": "MOW", "MOSKVA": "MOW", "МОСКВА": "MOW",
-    "SAINT-PETERSBURG": "LED", "LED": "LED", "САНКТ-ПЕТЕРБУРГ": "LED",
-    "SOCHI": "AER", "AER": "AER", "СОЧИ": "AER",
-    "YEKATERINBURG": "SVX", "SVX": "SVX", "ЕКАТЕРИНБУРГ": "SVX",
-    "KAZAN": "KZN", "KZN": "KZN", "КАЗАНЬ": "KZN",
-    "ISTANBUL": "IST", "IST": "IST", "СТАМБУЛ": "IST",
-    "MADRID": "MAD", "MAD": "MAD", "МАДРИД": "MAD",
-    "BARCELONA": "BCN", "BCN": "BCN", "БАРСЕЛОНА": "BCN",
-    "PARIS": "CDG", "CDG": "CDG", "ПАРИЖ": "CDG",
-    "LONDON": "LON", "LON": "LON",
-    # Добавим ещё популярные
-    "BERLIN": "BER", "AMSTERDAM": "AMS", "VIENNA": "VIE",
-    "DUBAI": "DXB", "TOKYO": "TYO", "BEIJING": "PEK",
-    "NEW YORK": "NYC", "LOS ANGELES": "LAX", "CHICAGO": "ORD"
-}
+def init_db():
+    """Создаёт таблицу для хранения ответов API при первом запуске"""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS api_flight_responses (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                origin TEXT NOT NULL,
+                destination TEXT NOT NULL,
+                depart_date TEXT NOT NULL,
+                return_date TEXT,
+                response_json TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                search_hash TEXT UNIQUE
+            )
+        ''')
+        conn.commit()
 
 def normalize_iata(city: str) -> str:
     """
     Преобразует название города в IATA-код.
     """
     upper_city = city.strip().upper()
+    IATA_MAP = {
+        "MOSCOW": "MOW", "MOW": "MOW", "MOSKVA": "MOW", "МОСКВА": "MOW",
+        "SAINT-PETERSBURG": "LED", "LED": "LED", "САНКТ-ПЕТЕРБУРГ": "LED",
+        "SOCHI": "AER", "AER": "AER", "СОЧИ": "AER",
+        "YEKATERINBURG": "SVX", "SVX": "SVX", "ЕКАТЕРИНБУРГ": "SVX",
+        "KAZAN": "KZN", "KZN": "KZN", "КАЗАНЬ": "KZN",
+        "ISTANBUL": "IST", "IST": "IST", "СТАМБУЛ": "IST",
+        "MADRID": "MAD", "MAD": "MAD", "МАДРИД": "MAD",
+        "BARCELONA": "BCN", "BCN": "BCN", "БАРСЕЛОНА": "BCN",
+        "PARIS": "CDG", "CDG": "CDG", "ПАРИЖ": "CDG",
+        "LONDON": "LON", "LON": "LON",
+        "BERLIN": "BER", "AMSTERDAM": "AMS", "VIENNA": "VIE",
+        "DUBAI": "DXB", "TOKYO": "TYO", "BEIJING": "PEK",
+        "NEW YORK": "NYC", "LOS ANGELES": "LAX", "CHICAGO": "ORD"
+    }
     return IATA_MAP.get(upper_city, upper_city[:3].upper())
 
 def validate_date(date_str: str) -> bool:
@@ -50,38 +73,58 @@ def validate_date(date_str: str) -> bool:
     except ValueError:
         return False
 
-def save_to_json(data: dict):
+def save_api_response_to_db(origin: str, destination: str, depart_date: str, return_date: str, response_data: dict):
     """
-    Сохраняет данные в JSON-файл.
+    Сохраняет ответ API в таблицу api_flight_responses с уникальным хешем.
     """
-    try:
-        with open(JSON_FILE_PATH, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=4)
-        print(f"✅ Ответ API сохранён в {JSON_FILE_PATH}")
-    except Exception as e:
-        print(f"❌ Ошибка при сохранении в JSON: {e}")
+    search_hash = f"{origin}_{destination}_{depart_date}_{return_date or 'OW'}"
 
-def load_from_json() -> dict:
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT OR REPLACE INTO api_flight_responses 
+                (origin, destination, depart_date, return_date, response_json, search_hash)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (
+                origin,
+                destination,
+                depart_date,
+                return_date,
+                json.dumps(response_data, ensure_ascii=False, indent=2),
+                search_hash
+            ))
+            conn.commit()
+        print("✅ Ответ API сохранён в history.db")
+    except Exception as e:
+        print(f"❌ Ошибка при сохранении в БД: {e}")
+
+def load_latest_api_response_from_db() -> dict:
     """
-    Загружает данные из JSON-файла.
-    Возвращает пустой словарь, если файла нет.
+    Загружает последний успешный ответ API из БД.
     """
     try:
-        if os.path.exists(JSON_FILE_PATH):
-            with open(JSON_FILE_PATH, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            print(f"✅ Данные загружены из {JSON_FILE_PATH}")
-            return data
-        else:
-            print(f"⚠️ Файл {JSON_FILE_PATH} не найден. Будет создан при следующем сохранении.")
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT response_json FROM api_flight_responses
+                ORDER BY created_at DESC LIMIT 1
+            ''')
+            row = cursor.fetchone()
+            if row:
+                print("✅ Последний ответ API загружен из БД")
+                return json.loads(row[0])
+            else:
+                print("⚠️ Нет сохранённых ответов API в БД")
+                return {}
     except Exception as e:
-        print(f"❌ Ошибка при чтении JSON: {e}")
-    return {}
+        print(f"❌ Ошибка при чтении из БД: {e}")
+        return {}
 
 def search_cheap_flights(origin: str, destination: str, depart_date: str, return_date: str = None):
     """
     Поиск дешёвых авиабилетов через Aviasales API v3.
-    Сохраняет полный ответ API в JSON и берёт ссылку 'link' как есть.
+    Сохраняет полный ответ API в history.db и берёт ссылку 'link' как есть.
 
     :param origin: Город вылета
     :param destination: Город прилёта
@@ -127,8 +170,8 @@ def search_cheap_flights(origin: str, destination: str, depart_date: str, return
         response.raise_for_status()
         data = response.json()
 
-        # Сохраняем весь ответ API в JSON
-        save_to_json(data)
+        # Сохраняем весь ответ API в history.db
+        save_api_response_to_db(origin, destination, depart_date, return_date, data)
 
         if not data.get('data'):
             print("❌ Нет рейсов, найденных по вашему запросу.")
@@ -136,7 +179,6 @@ def search_cheap_flights(origin: str, destination: str, depart_date: str, return
 
         flights = []
         for item in data['data']:
-            # Берём ссылку напрямую из поля 'link', без изменений
             link = item.get('link')
             if not link or not link.startswith('/search/'):
                 print(f"⚠️ Пропущен рейс: некорректная ссылка 'link' → {link}")
@@ -150,17 +192,17 @@ def search_cheap_flights(origin: str, destination: str, depart_date: str, return
                 'departure_at': item.get('departure_at'),
                 'return_at': item.get('return_at'),
                 'transfers': item.get('transfers', 0),
-                'url': final_url  # Оригинальная ссылка из 'link'
+                'url': final_url
             }
             flights.append(flight_data)
         return flights
 
     except requests.exceptions.Timeout:
         print("❌ Ошибка: таймаут при запросе к API.")
-        # При ошибке — используем кэш
-        cached_data = load_from_json()
+        # При ошибке — используем кэш из БД
+        cached_data = load_latest_api_response_from_db()
         if cached_data:
-            print("⚠️ Используем кэшированные данные из JSON")
+            print("⚠️ Используем кэшированные данные из БД")
             return extract_flights_from_cache(cached_data)
     except requests.exceptions.RequestException as e:
         print(f"❌ Ошибка HTTP-запроса: {e}")
@@ -222,7 +264,7 @@ def get_weather(city: str) -> str:
             'units': 'metric',
             'lang': 'ru'
         }
-        w_resp = requests.get(weather_url, params=w_params, timeout=10)
+        w_resp = requests.get(weather_url, params=w_params, timeout=15)  # Увеличен таймаут до 15 секунд
         w_resp.raise_for_status()
         w = w_resp.json()
 
@@ -233,6 +275,20 @@ def get_weather(city: str) -> str:
         get_weather.cache[city] = result
         return result
 
+    except requests.exceptions.Timeout:
+        print("⚠️ Таймаут при запросе к API погоды. Повторная попытка...")
+        try:
+            # Повторный запрос с увеличенным временем
+            w_resp = requests.get(weather_url, params=w_params, timeout=20)
+            w_resp.raise_for_status()
+            w = w_resp.json()
+            temp = round(w['main']['temp'])
+            desc = w['weather'][0]['description'].capitalize()
+            result = f"🌡 {temp}°C, {desc}"
+            get_weather.cache[city] = result
+            return result
+        except Exception:
+            return "ошибка получения (таймаут)"
     except requests.exceptions.RequestException as e:
         print(f"❌ Ошибка API погоды: {e}")
         return "ошибка получения"
