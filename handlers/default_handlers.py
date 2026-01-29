@@ -7,7 +7,7 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
 def start_command(message):
     bot.send_message(
         message.chat.id,
-        "✈️🌤 Привет! Я помогу найти дешёвые авиабилеты и узнать погоду.",
+        "✈️🌤 Привет! Я помогу найти авиабилеты и узнать погоду.",
         reply_markup=main_menu()
     )
 

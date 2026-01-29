@@ -7,7 +7,7 @@ def request_city_for_weather(message):
     bot.send_message(message.chat.id, "Введите название города, чтобы узнать погоду:")
 
 
-@bot.message_handler(func=lambda message: message.text and message.text not in ["🌤 Погода", "Поиск авиабилетов"])
+@bot.message_handler(func=lambda message: message.text and message.text not in ["🌤 Погода"])
 def show_weather(message):
     city = message.text.strip()
     bot.send_message(message.chat.id, f"🔍 Определяем погоду в городе **{city}**...")
