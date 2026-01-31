@@ -1,5 +1,9 @@
-python-dotenv
-requests
-pyTelegramBotAPI
-dotenv
-peewee
+certifi==2026.1.4
+charset-normalizer==3.4.4
+dotenv==0.9.9
+idna==3.11
+peewee==3.19.0
+pyTelegramBotAPI==4.30.0
+python-dotenv==1.2.1
+requests==2.32.5
+urllib3==2.6.3
