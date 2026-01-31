@@ -78,7 +78,7 @@ def parse_callback_data(data: str):
         return None
 
 
-@bot.message_handler(func=lambda m: m.text == "Поиск авиабилетов")
+@bot.message_handler(func=lambda m: m.text == "✈Поиск авиабилетов")
 def ask_origin_roundtrip(message):
     bot.send_message(message.chat.id, "🌆 Введите город вылета (например, Москва или MOW):")
     bot.register_next_step_handler(message, get_destination_roundtrip)
