@@ -4,6 +4,8 @@ import json
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from database.models import ApiFlightResponse
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 load_dotenv()
 
@@ -11,9 +13,49 @@ TRAVEL_TOKEN = os.getenv('TRAVEL_TOKEN')
 WEATHER_KEY = os.getenv('WEATHER_KEY')
 
 
+def get_cities_iata(query: str) -> dict:
+    """
+    Получает IATA-коды городов отправления и назначения с помощью TravelPayouts widgets API.
+    Поддерживает запросы вида "Из Москвы в Лондон" и определение столиц по странам.
+    
+    Args:
+        query: Поисковая фраза на русском языке (например, "Из Москвы в Лондон")
+    
+    Returns:
+        Словарь с ключами 'origin' и 'destination' и их IATA-кодами,
+        или пустой словарь при ошибке
+    """
+    try:
+        url = "https://www.travelpayouts.com/widgets_suggest_params"
+        params = {
+            'q': query.strip()
+        }
+        response = requests.get(url, params=params, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        
+        result = {}
+        if data.get('origin', {}).get('iata'):
+            result['origin'] = data['origin']['iata']
+        
+        if data.get('destination', {}).get('iata'):
+            result['destination'] = data['destination']['iata']
+            
+        if result:
+            print(f"✅ Успешно получены IATA-коды: {result}")
+            
+        return result
+        
+    except Exception as e:
+        print(f"❌ Не удалось получить IATA-коды через widgets API: {e}")
+    
+    return {}
+
+
 def normalize_iata(city: str) -> str:
     """
     Преобразует название города в IATA-код.
+    Сначала проверяет встроенный словарь, затем запрашивает через API.
     """
     upper_city = city.strip().upper()
     iata_map = {
@@ -32,7 +74,10 @@ def normalize_iata(city: str) -> str:
         "NEW YORK": "NYC", "LOS ANGELES": "LAX", "CHICAGO": "ORD",
         "UFA": "UFA", "UF": "UFA", "УФА": "UFA"
     }
-    return iata_map.get(upper_city, upper_city[:3].upper())
+    
+    # Сначала ищем в локальном словаре
+    if upper_city in iata_map:
+        return iata_map[upper_city]
 
 
 def validate_date(date_str: str) -> bool:
@@ -100,8 +145,22 @@ def search_cheap_flights(origin: str, destination: str, depart_date: str, return
             print(f"❌ Не удалось рассчитать дату возврата: {e}")
             return []
 
-    origin_iata = normalize_iata(origin)
-    dest_iata = normalize_iata(destination)
+    # Сначала пробуем получить оба кода сразу через widgets API
+    cities_data = get_cities_iata(f"Из {origin} в {destination}")
+    
+    origin_iata = cities_data.get('origin')
+    if origin_iata:
+        print(f"✅ Используем IATA-код {origin_iata} для города {origin} из widgets API")
+    else:
+        # Если widgets API не помог, используем обычный метод
+        origin_iata = normalize_iata(origin)
+
+    dest_iata = cities_data.get('destination')
+    if dest_iata:
+        print(f"✅ Используем IATA-код {dest_iata} для города {destination} из widgets API")
+    else:
+        # Если widgets API не помог, используем обычный метод
+        dest_iata = normalize_iata(destination)
 
     url = "https://api.travelpayouts.com/aviasales/v3/prices_for_dates"
     params = {
@@ -180,36 +239,34 @@ def extract_flights_from_cache(data: dict) -> list:
 
 def get_weather(city: str) -> str:
     """
-    Получает текущую погоду в городе.
-    Использует кэширование в памяти.
+    Получает текущую погоду в городе с retry и кэшированием координат.
     """
-    if not hasattr(get_weather, 'cache'):
-        get_weather.cache = {}
-
-    if city in get_weather.cache:
-        print(f"🌤 Используем кэш для погоды: {city}")
-        return get_weather.cache[city]
-
-    # Инициализация переменных заранее
     weather_url = "https://api.openweathermap.org/data/2.5/weather"
-    w_params = {}
+
+    session = requests.Session()
+    retry_strategy = Retry(
+        total=3,
+        backoff_factor=1,
+        status_forcelist=[429, 500, 502, 503, 504],
+    )
+    adapter = HTTPAdapter(max_retries=retry_strategy)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
 
     try:
-        # Получение координат
+        # Получение координат с retry
         geo_url = "https://api.openweathermap.org/geo/1.0/direct"
         geo_params = {'q': city, 'limit': 1, 'appid': WEATHER_KEY}
-        geo_resp = requests.get(geo_url, params=geo_params, timeout=10)
+        geo_resp = session.get(geo_url, params=geo_params, timeout=30)
         geo_resp.raise_for_status()
         geo_data = geo_resp.json()
 
         if not geo_data:
-            result = "город не найден"
-            get_weather.cache[city] = result
-            return result
+            return "город не найден"
 
         lat, lon = geo_data[0]['lat'], geo_data[0]['lon']
 
-        # Настройка параметров для запроса погоды
+        # Запрос погоды
         w_params = {
             'lat': lat,
             'lon': lon,
@@ -218,36 +275,22 @@ def get_weather(city: str) -> str:
             'lang': 'ru'
         }
 
-        w_resp = requests.get(weather_url, params=w_params, timeout=15)
+        w_resp = session.get(weather_url, params=w_params, timeout=30)
         w_resp.raise_for_status()
         w = w_resp.json()
 
         temp = round(w['main']['temp'])
         desc = w['weather'][0]['description'].capitalize()
-        result = f"🌡 {temp}°C, {desc}"
+        return f"🌡 {temp}°C, {desc}"
 
     except requests.exceptions.Timeout:
-        print("⚠️ Таймаут при запросе к API погоды. Повторная попытка...")
-        try:
-            w_resp = requests.get(weather_url, params=w_params, timeout=20)
-            w_resp.raise_for_status()
-            w = w_resp.json()
-            temp = round(w['main']['temp'])
-            desc = w['weather'][0]['description'].capitalize()
-            result = f"🌡 {temp}°C, {desc}"
-        except requests.exceptions.RequestException:
-            result = "ошибка получения (таймаут)"
-        except Exception:
-            result = "недоступна"
+        return "ошибка получения (таймаут)"
     except requests.exceptions.RequestException as e:
         print(f"❌ Ошибка API погоды: {e}")
-        result = "ошибка получения"
+        return "ошибка получения"
     except (KeyError, IndexError, TypeError) as e:
-        print(f"❌ Ошибка парсинга данных погоды: {e}")
-        result = "недоступна"
+        print(f"❌ Ошибка парсинга: {e}")
+        return "недоступна"
     except Exception as e:
-        print(f"❌ Необработанная ошибка в get_weather: {e}")
-        result = "недоступна"
-
-    get_weather.cache[city] = result
-    return result
+        print(f"❌ Необработанная ошибка: {e}")
+        return "недоступна"
