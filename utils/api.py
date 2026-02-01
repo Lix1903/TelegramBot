@@ -239,25 +239,35 @@ def extract_flights_from_cache(data: dict) -> list:
 
 def get_weather(city: str) -> str:
     """
-    Получает текущую погоду в городе с retry и кэшированием координат.
+    Погода с коротким connect-timeout и fallback.
     """
     weather_url = "https://api.openweathermap.org/data/2.5/weather"
 
+    # Короткий connect-timeout для быстрого fail
     session = requests.Session()
     retry_strategy = Retry(
-        total=3,
-        backoff_factor=1,
+        total=2,  # Меньше повторов
+        backoff_factor=0.5,
         status_forcelist=[429, 500, 502, 503, 504],
     )
-    adapter = HTTPAdapter(max_retries=retry_strategy)
+    adapter = HTTPAdapter(
+        max_retries=retry_strategy,
+        pool_connections=1,
+        pool_maxsize=1
+    )
     session.mount("http://", adapter)
     session.mount("https://", adapter)
 
     try:
-        # Получение координат с retry
+        # Geo с коротким connect
         geo_url = "https://api.openweathermap.org/geo/1.0/direct"
         geo_params = {'q': city, 'limit': 1, 'appid': WEATHER_KEY}
-        geo_resp = session.get(geo_url, params=geo_params, timeout=30)
+        geo_resp = session.get(
+            geo_url,
+            params=geo_params,
+            timeout=(5, 25),  # connect=5s, read=25s
+            headers={'User-Agent': 'Mozilla/5.0 (compatible; TelegramBot)'}
+        )
         geo_resp.raise_for_status()
         geo_data = geo_resp.json()
 
@@ -266,16 +276,12 @@ def get_weather(city: str) -> str:
 
         lat, lon = geo_data[0]['lat'], geo_data[0]['lon']
 
-        # Запрос погоды
+        # Погода
         w_params = {
-            'lat': lat,
-            'lon': lon,
-            'appid': WEATHER_KEY,
-            'units': 'metric',
-            'lang': 'ru'
+            'lat': lat, 'lon': lon, 'appid': WEATHER_KEY,
+            'units': 'metric', 'lang': 'ru'
         }
-
-        w_resp = session.get(weather_url, params=w_params, timeout=30)
+        w_resp = session.get(weather_url, params=w_params, timeout=(5, 25))
         w_resp.raise_for_status()
         w = w_resp.json()
 
@@ -283,14 +289,24 @@ def get_weather(city: str) -> str:
         desc = w['weather'][0]['description'].capitalize()
         return f"🌡 {temp}°C, {desc}"
 
+    except requests.exceptions.ConnectTimeout:
+        return "⏰ Медленное соединение (timeout connect)"
     except requests.exceptions.Timeout:
-        return "ошибка получения (таймаут)"
+        return "⏰ Таймаут запроса"
     except requests.exceptions.RequestException as e:
-        print(f"❌ Ошибка API погоды: {e}")
-        return "ошибка получения"
-    except (KeyError, IndexError, TypeError) as e:
-        print(f"❌ Ошибка парсинга: {e}")
+        print(f"❌ API ошибка: {e}")
+        return fallback_weather(city)  # Fallback
+    except (KeyError, IndexError):
         return "недоступна"
-    except Exception as e:
-        print(f"❌ Необработанная ошибка: {e}")
-        return "недоступна"
+
+
+def fallback_weather(city: str) -> str:
+    """Fallback на бесплатный wttr.in (без ключа)."""
+    try:
+        url = f"http://wttr.in/{city}?format=%t+%c&lang=ru"
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        data = resp.text.strip()
+        return f"🌡 {data}" if data else "недоступна"
+    except:
+        return "🌤️ недоступна"

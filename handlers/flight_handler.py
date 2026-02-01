@@ -84,8 +84,30 @@ def ask_origin_roundtrip(message):
     bot.register_next_step_handler(message, get_destination_roundtrip)
 
 
+def validate_city_input(city: str) -> bool:
+    """
+    Проверяет корректность ввода города.
+    Возвращает True, если название города допустимо.
+    """
+    if not city or not city.strip():
+        return False
+    if city.strip().isdigit():
+        return False
+    if len(city.strip()) < 2:
+        return False
+    return True
+
+
 def get_destination_roundtrip(message):
     origin = message.text.strip()
+    
+    # Проверка корректности ввода города вылета
+    if not validate_city_input(origin):
+        bot.send_message(message.chat.id, "❌ Название города вылета некорректно. Пожалуйста, введите правильное название города.")
+        bot.send_message(message.chat.id, "🌆 Введите город вылета (например, Москва или MOW):")
+        bot.register_next_step_handler(message, get_destination_roundtrip)
+        return
+    
     print(f"город вылета: {origin}")
     bot.send_message(message.chat.id, "🌆 Введите город прилёта:")
     bot.register_next_step_handler(message, lambda m: ask_depart_date(m, origin))
@@ -93,6 +115,14 @@ def get_destination_roundtrip(message):
 
 def ask_depart_date(message, origin):
     destination = message.text.strip()
+    
+    # Проверка корректности ввода города прилёта
+    if not validate_city_input(destination):
+        bot.send_message(message.chat.id, "❌ Название города прилёта некорректно. Пожалуйста, введите правильное название города.")
+        bot.send_message(message.chat.id, "🌆 Введите город прилёта:")
+        bot.register_next_step_handler(message, lambda m: ask_depart_date(m, origin))
+        return
+    
     print(f"город прилёта: {destination}")
     bot.send_message(message.chat.id, "📅 Введите дату вылета (ГГГГ-ММ-ДД):")
     bot.register_next_step_handler(message, lambda m: ask_return_date(m, origin, destination))
@@ -129,7 +159,8 @@ def show_flight_results(message, origin, destination, depart_date):
     )
 
     if not flights:
-        bot.send_message(user_id, "❌ К сожалению, не удалось найти авиабилеты по вашему запросу.")
+        bot.send_message(user_id, "❌ К сожалению, не удалось найти авиабилеты по вашему запросу. "
+                                  "Проверьте данные и поробуйте снова.")
         return
 
     # Сохраняем запрос в БД
