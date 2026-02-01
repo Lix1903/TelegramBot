@@ -138,7 +138,7 @@ bash curl wttr.in/Moscow?format=j1
 
 #### 1. Клонируйте репозиторий:
 
-bash git clone https://github.com/yourusername/flight-bot.git cd flight-bot
+bash git clone https://github.com/Lix1903/TelegramBot/ cd TelegramBot
 
 #### 2. Установите зависимости:
 
@@ -161,8 +161,7 @@ bash python main.py
 - Доступ к интернету
 
 #### Файловая структура:
-
-flight-bot/ ├── api/ │
+TelegramBot/ ├── api/ │
                 ├── init.py │ 
             ├── config_data/ │
                 ├── config.py │ 
