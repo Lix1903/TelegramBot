@@ -29,7 +29,8 @@ def normalize_iata(city: str) -> str:
         "LONDON": "LON", "LON": "LON",
         "BERLIN": "BER", "AMSTERDAM": "AMS", "VIENNA": "VIE",
         "DUBAI": "DXB", "TOKYO": "TYO", "BEIJING": "PEK",
-        "NEW YORK": "NYC", "LOS ANGELES": "LAX", "CHICAGO": "ORD"
+        "NEW YORK": "NYC", "LOS ANGELES": "LAX", "CHICAGO": "ORD",
+        "UFA": "UFA", "UF": "UFA", "УФА": "UFA"
     }
     return iata_map.get(upper_city, upper_city[:3].upper())
 
@@ -57,7 +58,7 @@ def save_api_response_to_db(origin: str, destination: str, depart_date: str, ret
             depart_date=depart_date,
             return_date=return_date,
             response_json=json.dumps(response_data, ensure_ascii=False, indent=2),
-            search_hash=search_hash
+            search_hash=search_hash + "_" + str(int(datetime.now().timestamp()))
         )
         print("✅ Ответ API сохранён в database/history.db (через Peewee)")
     except Exception as e:
